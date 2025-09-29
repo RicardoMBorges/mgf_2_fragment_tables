@@ -61,6 +61,19 @@ except Exception as e:
     st.error(f"Could not import mgf_2_fragTable: {e}")
     st.stop()
 
+from PIL import Image
+
+st.title("HPLC Gradient Verification")
+
+STATIC_DIR = Path(__file__).parent / "static"
+LOGO_PATH = STATIC_DIR / "LAABio.png"
+
+try:
+    logo = Image.open(LOGO_PATH)  # raises if missing
+    st.sidebar.image(logo, use_column_width=True)
+except FileNotFoundError:
+    st.sidebar.warning("Logo not found at static/LAABio.png")
+
 
 # -----------------------------
 # Helpers
@@ -275,3 +288,4 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
