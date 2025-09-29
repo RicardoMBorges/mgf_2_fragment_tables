@@ -13,6 +13,7 @@ from typing import List, Tuple
 import tempfile, shutil
 
 st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
+st.write("Boot OK")  # keep temporarily to confirm render
 
 def _import_local_module(mod_name: str, base: Path):
     f = base / f"{mod_name}.py"
