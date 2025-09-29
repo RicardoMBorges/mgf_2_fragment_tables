@@ -63,8 +63,6 @@ except Exception as e:
 
 from PIL import Image
 
-st.title("HPLC Gradient Verification")
-
 STATIC_DIR = Path(__file__).parent / "static"
 LOGO_PATH = STATIC_DIR / "LAABio.png"
 
@@ -288,4 +286,5 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
 
