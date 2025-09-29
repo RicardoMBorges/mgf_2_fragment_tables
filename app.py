@@ -16,9 +16,6 @@ st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
 st.write("Boot OK")  # keep temporarily to confirm render
 
 
-
-https://github.com/RicardoMBorges/mgf_2_fragment_tables/blob/main/README.md
-
 st.markdown(
     """
     Upload **.mgf** files to extract fragments from MS/MS spectra.  
@@ -27,6 +24,8 @@ st.markdown(
     contact: ricardo_mborges@yahoo.com.br  
 
     🔗 Details: [GitHub repository](https://github.com/RicardoMBorges/mgf_2_fragment_tables)
+
+    [Tutorial] (https://github.com/RicardoMBorges/mgf_2_fragment_tables/blob/main/README.md)
 
     Check also: [DAFdiscovery] (https://dafdiscovery.streamlit.app/)
     
@@ -44,8 +43,6 @@ st.markdown("""
 </a>
 </center>
 """, unsafe_allow_html=True)
-
-
 
 def _import_local_module(mod_name: str, base: Path):
     f = base / f"{mod_name}.py"
@@ -318,6 +315,7 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
 
 
 
