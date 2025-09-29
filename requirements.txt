@@ -1,0 +1,5 @@
+streamlit>=1.33
+pyteomics>=4.6
+numpy>=1.26,<2.0
+pandas>=2.2,<2.3
+plotly>=5.20
