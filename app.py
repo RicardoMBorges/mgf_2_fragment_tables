@@ -15,6 +15,38 @@ import tempfile, shutil
 st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
 st.write("Boot OK")  # keep temporarily to confirm render
 
+
+
+https://github.com/RicardoMBorges/mgf_2_fragment_tables/blob/main/README.md
+
+st.markdown(
+    """
+    Upload **.mgf** files to extract fragments from MS/MS spectra.  
+
+    Developed by **Ricardo M Borges** and **LAABio-IPPN-UFRJ**  
+    contact: ricardo_mborges@yahoo.com.br  
+
+    🔗 Details: [GitHub repository](https://github.com/RicardoMBorges/mgf_2_fragment_tables)
+
+    Check also: [DAFdiscovery] (https://dafdiscovery.streamlit.app/)
+    
+    Check also: [TLC2Chrom] (https://tlc2chrom.streamlit.app/)
+    """
+)
+
+# PayPal donate button
+st.markdown("""
+<hr>
+<center>
+<p>To support the app development:</p>
+<a href="https://www.paypal.com/donate/?business=2FYTFNDV4F2D4&no_recurring=0&item_name=Support+with+%245+→+Send+receipt+to+tlc2chrom.app@gmail.com+with+your+login+email+→+Access+within+24h!&currency_code=USD" target="_blank">
+    <img src="https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif" alt="Donate with PayPal button" border="0">
+</a>
+</center>
+""", unsafe_allow_html=True)
+
+
+
 def _import_local_module(mod_name: str, base: Path):
     f = base / f"{mod_name}.py"
     if f.exists():
@@ -286,5 +318,6 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
 
 
