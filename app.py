@@ -207,7 +207,7 @@ with st.sidebar:
     q = st.text_input("Filter rows (simple substring over all columns)", "")
     st.caption("Tip: try a batch name, scan number, or m/z value.")
 
-VIDEO_URL = "https://youtu.be/V-AncFEH32Y"
+VIDEO_URL = "https://youtu.be/qeU8rRxtwXk"
 try:
     st.sidebar.link_button("Video", VIDEO_URL)
 except Exception:
@@ -328,6 +328,7 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
 
 
 
