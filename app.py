@@ -44,6 +44,17 @@ st.markdown("""
 </center>
 """, unsafe_allow_html=True)
 
+VIDEO_URL = "https://youtu.be/V-AncFEH32Y"
+try:
+    st.sidebar.link_button("Video", VIDEO_URL)
+except Exception:
+    st.sidebar.markdown(
+        f'<a href="{VIDEO_URL}" target="_blank">'
+        '<button style="padding:0.6rem 1rem; border-radius:8px; border:1px solid #ddd; cursor:pointer;">📘 Tutorial</button>'
+        '</a>',
+        unsafe_allow_html=True,
+    )
+
 def _import_local_module(mod_name: str, base: Path):
     f = base / f"{mod_name}.py"
     if f.exists():
@@ -315,6 +326,7 @@ if df is not None and len(df):
     )
 else:
     st.info("Load your .mgf data (upload files or provide a path) and click **Build table**.")
+
 
 
 
