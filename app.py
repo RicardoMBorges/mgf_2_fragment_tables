@@ -11,6 +11,8 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import streamlit as st
 
+APP_VERSION = "v0.3 — optional MGF metadata / InChIKey support"
+
 st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
 
 st.markdown(
@@ -108,8 +110,11 @@ OPTIONAL_METADATA_FIELDS: Dict[str, List[str]] = {
         "inchikey",
         "inchi_key",
         "inchi-key",
+        "inchi key",
         "inchikey2d",
+        "inchikey_2d",
         "inchikey14",
+        "inchikey_14",
         "ik",
     ],
     "smiles": [
@@ -178,8 +183,21 @@ OPTIONAL_METADATA_FIELDS: Dict[str, List[str]] = {
 
 
 def _norm_key(key: Any) -> str:
-    """Normalize MGF metadata keys for flexible matching."""
-    return str(key).strip().lower().replace(" ", "_")
+    """Normalize MGF metadata keys for flexible matching.
+
+    MGF exporters are inconsistent: INCHIKEY, INCHI_KEY, InChI-Key and
+    inchi key should all match the same field.
+    """
+    import re
+    return re.sub(r"[^a-z0-9]", "", str(key).strip().lower())
+
+
+def _norm_batch(value: Any) -> str:
+    """Normalize file/batch labels so file.mgf and file can be matched."""
+    txt = str(value).strip().replace("\\", "/").split("/")[-1]
+    if txt.lower().endswith(".mgf"):
+        txt = txt[:-4]
+    return txt.lower()
 
 
 def _clean_value(value: Any) -> str:
@@ -225,6 +243,7 @@ def _metadata_records_from_mgf_file(mgf_path: Path) -> List[Dict[str, Any]]:
             params = spectrum.get("params", {}) or {}
             record: Dict[str, Any] = {
                 "batch": mgf_path.name,
+                "batch_key": _norm_batch(mgf_path.name),
                 "metadata_order": i,
                 "metadata_scan_key": _clean_value(
                     params.get("scans")
@@ -262,6 +281,7 @@ def extract_optional_metadata_from_dir(folder_with_mgfs: str) -> pd.DataFrame:
             records.append(
                 {
                     "batch": mgf_path.name,
+                    "batch_key": _norm_batch(mgf_path.name),
                     "metadata_order": None,
                     "metadata_scan_key": "",
                     "metadata_precursor_mass": None,
@@ -276,6 +296,7 @@ def _add_merge_helpers(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "batch" not in out.columns:
         out["batch"] = ""
+    out["batch_key"] = out["batch"].apply(_norm_batch)
     scan_source = None
     for col in ["scans", "scan_number", "scan", "spectrum_id"]:
         if col in out.columns:
@@ -302,19 +323,26 @@ def merge_metadata_into_fragment_table(df: pd.DataFrame, metadata_df: pd.DataFra
 
     merged = left.merge(
         right,
-        on=["batch", "metadata_scan_key"],
+        on=["batch_key", "metadata_scan_key"],
         how="left",
         suffixes=("", "_mgf"),
     )
+
+    # Keep the original table batch name after merging on normalized batch_key.
+    if "batch_x" in merged.columns and "batch" not in merged.columns:
+        merged = merged.rename(columns={"batch_x": "batch"})
+    if "batch_y" in merged.columns:
+        merged = merged.drop(columns=["batch_y"], errors="ignore")
 
     # Fallback: if scan-based merge failed for some rows, fill by row order within each batch.
     missing = merged["metadata_order"].isna() if "metadata_order" in merged.columns else pd.Series(False, index=merged.index)
     if missing.any() and "batch" in df.columns:
         order_left = df.copy()
-        order_left["metadata_order"] = order_left.groupby("batch").cumcount() + 1
+        order_left["batch_key"] = order_left["batch"].apply(_norm_batch)
+        order_left["metadata_order"] = order_left.groupby("batch_key").cumcount() + 1
         order_merged = order_left.merge(
             right,
-            on=["batch", "metadata_order"],
+            on=["batch_key", "metadata_order"],
             how="left",
             suffixes=("", "_mgf"),
         )
@@ -329,8 +357,15 @@ def merge_metadata_into_fragment_table(df: pd.DataFrame, metadata_df: pd.DataFra
         "metadata_precursor_mass",
         "metadata_precursor_mass_mgf",
         "metadata_order",
+        "batch_key",
+        "batch_mgf",
     ]
     merged = merged.drop(columns=[c for c in helper_cols if c in merged.columns], errors="ignore")
+
+    # Ensure these columns are visibly present even when the current MGF lacks them.
+    for col in OPTIONAL_METADATA_FIELDS:
+        if col not in merged.columns:
+            merged[col] = ""
 
     preferred_cols = [
         "batch",
@@ -459,6 +494,7 @@ def build_table_from_dir(
 # UI
 # -----------------------------
 st.title("MGF Survey → Fragment Summary Table")
+st.caption(APP_VERSION)
 
 with st.sidebar:
     st.header("Input options")
@@ -558,6 +594,12 @@ if df is not None and len(df):
             st.caption("Optional metadata detected: " + ", ".join(detected))
         else:
             st.caption("No optional annotation metadata detected in the uploaded MGF fields.")
+
+        with st.expander("Metadata check", expanded=False):
+            st.write("Columns in current table:", list(df.columns))
+            preview_cols = [c for c in ["batch", "compound_name", "inchikey", "smiles", "molecular_formula", "adduct", "rt_seconds", "rt_minutes"] if c in df.columns]
+            if preview_cols:
+                st.dataframe(df[preview_cols].head(10), use_container_width=True)
 
     st.dataframe(df_show, use_container_width=True, height=520)
 
