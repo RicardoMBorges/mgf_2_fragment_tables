@@ -2,22 +2,21 @@
 # Save as: app.py
 # Run: streamlit run app.py
 
-# --- Robust imports for cloud -----------------------------------------------
 from pathlib import Path
-import importlib.util
 import tempfile
 import shutil
-from typing import List, Tuple, Dict, Any, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-APP_VERSION = "v0.3 — optional MGF metadata / InChIKey support"
+APP_VERSION = "v0.4 — direct MGF parser with optional metadata / InChIKey support"
 
 st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
 
 st.markdown(
     """
-    Upload **.mgf** files to extract fragments from MS/MS spectra.  
+    Upload **.mgf** files to extract fragments from MS/MS spectra.
 
     Developed by **Ricardo M Borges** and **LAABio-IPPN-UFRJ**  
     contact: ricardo_mborges@yahoo.com.br  
@@ -27,7 +26,7 @@ st.markdown(
     [Tutorial](https://github.com/RicardoMBorges/mgf_2_fragment_tables/blob/main/README.md)
 
     Check also: [DAFdiscovery](https://dafdiscovery.streamlit.app/)
-    
+
     Check also: [TLC2Chrom](https://tlc2chrom.streamlit.app/)
     """
 )
@@ -46,56 +45,30 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-def _import_local_module(mod_name: str, base: Path):
-    f = base / f"{mod_name}.py"
-    if f.exists():
-        spec = importlib.util.spec_from_file_location(mod_name, f)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-        return mod
-    return None
-
-
-# Verify third-party deps first (clear message if missing)
 try:
     import numpy as np
     import pandas as pd
     import plotly.graph_objects as go
-    from pyteomics import mgf
 except ModuleNotFoundError as e:
     st.error(
         "A required package is missing: "
-        f"**{e.name}**. On Streamlit Cloud, make sure it's listed in `requirements.txt` "
-        "(see the app README)."
+        f"**{e.name}**. On Streamlit Cloud, make sure it is listed in `requirements.txt`."
     )
     st.stop()
 
-HERE = Path(__file__).resolve().parent
-
 try:
-    import mgf_2_fragTable as mgf2frag  # noqa: E402
-except ModuleNotFoundError:
-    mgf2frag = _import_local_module("mgf_2_fragTable", HERE)
+    from PIL import Image
 
-if mgf2frag is None:
-    st.error("`mgf_2_fragTable.py` not found. Place it beside `app.py` in the repo.")
-    st.stop()
-
-from PIL import Image
-
-STATIC_DIR = Path(__file__).parent / "static"
-LOGO_PATH = STATIC_DIR / "LAABio.png"
-
-try:
+    STATIC_DIR = Path(__file__).parent / "static"
+    LOGO_PATH = STATIC_DIR / "LAABio.png"
     logo = Image.open(LOGO_PATH)
     st.sidebar.image(logo, use_container_width=True)
-except FileNotFoundError:
+except Exception:
     st.sidebar.warning("Logo not found at static/LAABio.png")
 
 
 # -----------------------------
-# Metadata helpers
+# MGF metadata definitions
 # -----------------------------
 OPTIONAL_METADATA_FIELDS: Dict[str, List[str]] = {
     "compound_name": [
@@ -105,6 +78,7 @@ OPTIONAL_METADATA_FIELDS: Dict[str, List[str]] = {
         "compound",
         "title",
         "synonym",
+        "spectrum_name",
     ],
     "inchikey": [
         "inchikey",
@@ -179,193 +153,214 @@ OPTIONAL_METADATA_FIELDS: Dict[str, List[str]] = {
         "instrumenttype",
         "instrument_type",
     ],
+    "library_id": [
+        "spectrumid",
+        "spectrum_id",
+        "library_id",
+        "libraryid",
+        "spectrum_id_in_library",
+    ],
 }
 
 
 def _norm_key(key: Any) -> str:
-    """Normalize MGF metadata keys for flexible matching.
-
-    MGF exporters are inconsistent: INCHIKEY, INCHI_KEY, InChI-Key and
-    inchi key should all match the same field.
-    """
-    import re
+    """Normalize metadata keys so INCHIKEY, INCHI_KEY and InChI-Key all match."""
     return re.sub(r"[^a-z0-9]", "", str(key).strip().lower())
 
 
-def _norm_batch(value: Any) -> str:
-    """Normalize file/batch labels so file.mgf and file can be matched."""
-    txt = str(value).strip().replace("\\", "/").split("/")[-1]
-    if txt.lower().endswith(".mgf"):
-        txt = txt[:-4]
-    return txt.lower()
-
-
 def _clean_value(value: Any) -> str:
-    """Convert MGF parameter values to a compact text representation."""
     if value is None:
         return ""
-    if isinstance(value, (list, tuple)):
-        return ";".join(str(v) for v in value if v is not None)
     return str(value).strip()
 
 
 def _first_available_param(params: Dict[str, Any], aliases: List[str]) -> str:
-    """Return the first available value among alternative MGF parameter names."""
     normalized = {_norm_key(k): v for k, v in params.items()}
     for alias in aliases:
-        value = normalized.get(_norm_key(alias), "")
-        value = _clean_value(value)
+        value = _clean_value(normalized.get(_norm_key(alias), ""))
         if value:
             return value
     return ""
 
 
-def _parse_pepmass(value: Any) -> Optional[float]:
-    """Extract precursor m/z from pyteomics PEPMASS values."""
+def _parse_first_float(value: Any) -> Optional[float]:
     if value is None:
         return None
     try:
-        if isinstance(value, (list, tuple, np.ndarray)):
-            if len(value) == 0:
-                return None
-            return float(value[0])
         txt = str(value).replace(",", " ").split()[0]
         return float(txt)
     except Exception:
         return None
 
 
-def _metadata_records_from_mgf_file(mgf_path: Path) -> List[Dict[str, Any]]:
-    """Read optional metadata from all BEGIN IONS blocks in one MGF file."""
-    records: List[Dict[str, Any]] = []
-    with mgf.read(str(mgf_path)) as reader:
-        for i, spectrum in enumerate(reader, start=1):
-            params = spectrum.get("params", {}) or {}
-            record: Dict[str, Any] = {
-                "batch": mgf_path.name,
-                "batch_key": _norm_batch(mgf_path.name),
-                "metadata_order": i,
-                "metadata_scan_key": _clean_value(
-                    params.get("scans")
-                    or params.get("scan")
-                    or params.get("scan_number")
-                    or params.get("spectrumid")
-                    or params.get("spectrum_id")
-                    or i
-                ),
-                "metadata_precursor_mass": _parse_pepmass(
-                    params.get("pepmass") or params.get("precursor_mass")
-                ),
-            }
-            for out_col, aliases in OPTIONAL_METADATA_FIELDS.items():
-                record[out_col] = _first_available_param(params, aliases)
-            records.append(record)
-    return records
+def _format_float(value: float, ndigits: int = 6) -> str:
+    txt = f"{value:.{ndigits}f}"
+    return txt.rstrip("0").rstrip(".")
+
+
+def _parse_peak_line(line: str) -> Optional[Tuple[float, float]]:
+    """
+    Parse MGF peak lines like:
+    123.0456 98765
+    123.0456 98765 "annotation"
+    """
+    parts = line.split()
+    if len(parts) < 2:
+        return None
+    try:
+        mz = float(parts[0])
+        intensity = float(parts[1])
+        return mz, intensity
+    except ValueError:
+        return None
+
+
+def _parse_mgf_file_direct(mgf_path: Path) -> List[Dict[str, Any]]:
+    """
+    Parse one MGF file directly.
+
+    This avoids relying on a second metadata merge step. Metadata and fragments
+    are extracted from the same BEGIN IONS block, so optional fields such as
+    INCHIKEY, SMILES, FORMULA, RT and CE stay attached to the correct spectrum.
+    """
+    spectra: List[Dict[str, Any]] = []
+    in_block = False
+    params: Dict[str, str] = {}
+    peaks: List[Tuple[float, float]] = []
+
+    with open(mgf_path, "r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            upper = line.upper()
+
+            if upper == "BEGIN IONS":
+                in_block = True
+                params = {}
+                peaks = []
+                continue
+
+            if upper == "END IONS" and in_block:
+                spectra.append({"params": params, "peaks": peaks})
+                in_block = False
+                params = {}
+                peaks = []
+                continue
+
+            if not in_block:
+                continue
+
+            if "=" in line:
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                # Keep original key but handle repeated keys safely.
+                if key in params and params[key] != value:
+                    params[key] = f"{params[key]};{value}"
+                else:
+                    params[key] = value
+            else:
+                parsed_peak = _parse_peak_line(line)
+                if parsed_peak is not None:
+                    peaks.append(parsed_peak)
+
+    return spectra
+
+
+def _spectrum_to_record(
+    batch_name: str,
+    spectrum_index: int,
+    params: Dict[str, Any],
+    peaks: List[Tuple[float, float]],
+    top_n: int,
+    min_rel_pct: float,
+    include_metadata: bool,
+) -> Dict[str, Any]:
+    precursor_mass = _parse_first_float(
+        _first_available_param(params, ["pepmass", "precursor_mass", "precursormz", "precursor_mz"])
+    )
+
+    scans = _first_available_param(params, ["scans", "scan", "scan_number", "spectrumid", "spectrum_id"])
+    scan_number = scans if scans else str(spectrum_index)
+
+    record: Dict[str, Any] = {
+        "batch": batch_name,
+        "scans": scans,
+        "scan_number": scan_number,
+        "precursor_mass": precursor_mass if precursor_mass is not None else "",
+    }
+
+    if include_metadata:
+        for out_col, aliases in OPTIONAL_METADATA_FIELDS.items():
+            record[out_col] = _first_available_param(params, aliases)
+
+    if peaks:
+        mzs = np.array([p[0] for p in peaks], dtype=float)
+        intensities = np.array([p[1] for p in peaks], dtype=float)
+
+        max_intensity = float(np.nanmax(intensities)) if intensities.size else 0.0
+        if max_intensity > 0:
+            rels = intensities / max_intensity * 100.0
+        else:
+            rels = np.zeros_like(intensities)
+
+        mask = rels >= float(min_rel_pct)
+        filtered = list(zip(mzs[mask], rels[mask], intensities[mask]))
+
+        # Keep top N by relative intensity, then sort by m/z for a clean spectrum string.
+        filtered = sorted(filtered, key=lambda x: x[1], reverse=True)[: int(top_n)]
+        filtered = sorted(filtered, key=lambda x: x[0])
+
+        fragments = ";".join(
+            f"{_format_float(mz)}:{_format_float(rel, 2)}%" for mz, rel, _int in filtered
+        )
+
+        record["n_fragments_original"] = len(peaks)
+        record["n_fragments"] = len(filtered)
+        record["fragments"] = fragments
+    else:
+        record["n_fragments_original"] = 0
+        record["n_fragments"] = 0
+        record["fragments"] = ""
+
+    return record
 
 
 @st.cache_data(show_spinner=False)
-def extract_optional_metadata_from_dir(folder_with_mgfs: str) -> pd.DataFrame:
-    """
-    Extract optional annotations from MGF metadata.
-
-    This complements mgf_2_fragTable.py without requiring changes to that module.
-    If fields such as INCHIKEY, SMILES, FORMULA, RT or CE are absent, the
-    corresponding cells remain blank.
-    """
+def build_table_from_dir(
+    folder_with_mgfs: str,
+    top_n: int,
+    min_rel_pct: float,
+    include_metadata: bool = True,
+) -> pd.DataFrame:
+    """Build the fragment table directly from MGF blocks."""
     folder = Path(folder_with_mgfs)
     records: List[Dict[str, Any]] = []
+
     for mgf_path in sorted(folder.glob("*.mgf")):
-        try:
-            records.extend(_metadata_records_from_mgf_file(mgf_path))
-        except Exception as e:
+        spectra = _parse_mgf_file_direct(mgf_path)
+        for i, spectrum in enumerate(spectra, start=1):
             records.append(
-                {
-                    "batch": mgf_path.name,
-                    "batch_key": _norm_batch(mgf_path.name),
-                    "metadata_order": None,
-                    "metadata_scan_key": "",
-                    "metadata_precursor_mass": None,
-                    "metadata_read_error": str(e),
-                }
+                _spectrum_to_record(
+                    batch_name=mgf_path.name,
+                    spectrum_index=i,
+                    params=spectrum["params"],
+                    peaks=spectrum["peaks"],
+                    top_n=int(top_n),
+                    min_rel_pct=float(min_rel_pct),
+                    include_metadata=bool(include_metadata),
+                )
             )
-    return pd.DataFrame(records)
 
+    df = pd.DataFrame(records)
 
-def _add_merge_helpers(df: pd.DataFrame) -> pd.DataFrame:
-    """Create robust keys for matching fragment table rows to MGF metadata."""
-    out = df.copy()
-    if "batch" not in out.columns:
-        out["batch"] = ""
-    out["batch_key"] = out["batch"].apply(_norm_batch)
-    scan_source = None
-    for col in ["scans", "scan_number", "scan", "spectrum_id"]:
-        if col in out.columns:
-            scan_source = col
-            break
-    out["metadata_scan_key"] = (
-        out[scan_source].astype(str).str.strip() if scan_source else (out.index + 1).astype(str)
-    )
-    if "precursor_mass" in out.columns:
-        out["metadata_precursor_mass"] = pd.to_numeric(out["precursor_mass"], errors="coerce")
-    else:
-        out["metadata_precursor_mass"] = np.nan
-    return out
-
-
-def merge_metadata_into_fragment_table(df: pd.DataFrame, metadata_df: pd.DataFrame) -> pd.DataFrame:
-    """Merge optional MGF metadata into the fragment summary table."""
-    if df.empty or metadata_df.empty:
-        return df
-
-    left = _add_merge_helpers(df)
-    right = metadata_df.copy()
-    right["metadata_scan_key"] = right["metadata_scan_key"].astype(str).str.strip()
-
-    merged = left.merge(
-        right,
-        on=["batch_key", "metadata_scan_key"],
-        how="left",
-        suffixes=("", "_mgf"),
-    )
-
-    # Keep the original table batch name after merging on normalized batch_key.
-    if "batch_x" in merged.columns and "batch" not in merged.columns:
-        merged = merged.rename(columns={"batch_x": "batch"})
-    if "batch_y" in merged.columns:
-        merged = merged.drop(columns=["batch_y"], errors="ignore")
-
-    # Fallback: if scan-based merge failed for some rows, fill by row order within each batch.
-    missing = merged["metadata_order"].isna() if "metadata_order" in merged.columns else pd.Series(False, index=merged.index)
-    if missing.any() and "batch" in df.columns:
-        order_left = df.copy()
-        order_left["batch_key"] = order_left["batch"].apply(_norm_batch)
-        order_left["metadata_order"] = order_left.groupby("batch_key").cumcount() + 1
-        order_merged = order_left.merge(
-            right,
-            on=["batch_key", "metadata_order"],
-            how="left",
-            suffixes=("", "_mgf"),
-        )
-        for col in right.columns:
-            if col in ["batch", "metadata_order", "metadata_scan_key", "metadata_precursor_mass"]:
-                continue
-            if col in merged.columns and col in order_merged.columns:
-                merged.loc[missing, col] = merged.loc[missing, col].fillna(order_merged.loc[missing, col])
-
-    helper_cols = [
-        "metadata_scan_key",
-        "metadata_precursor_mass",
-        "metadata_precursor_mass_mgf",
-        "metadata_order",
-        "batch_key",
-        "batch_mgf",
-    ]
-    merged = merged.drop(columns=[c for c in helper_cols if c in merged.columns], errors="ignore")
-
-    # Ensure these columns are visibly present even when the current MGF lacks them.
-    for col in OPTIONAL_METADATA_FIELDS:
-        if col not in merged.columns:
-            merged[col] = ""
+    # Ensure optional metadata columns are always visible and exported.
+    if include_metadata:
+        for col in OPTIONAL_METADATA_FIELDS:
+            if col not in df.columns:
+                df[col] = ""
 
     preferred_cols = [
         "batch",
@@ -382,15 +377,17 @@ def merge_metadata_into_fragment_table(df: pd.DataFrame, metadata_df: pd.DataFra
         "collision_energy",
         "ion_mode",
         "instrument",
+        "library_id",
         "scans",
         "scan_number",
         "precursor_mass",
+        "n_fragments_original",
         "n_fragments",
         "fragments",
     ]
-    existing = [c for c in preferred_cols if c in merged.columns]
-    rest = [c for c in merged.columns if c not in existing]
-    return merged[existing + rest]
+    existing = [c for c in preferred_cols if c in df.columns]
+    rest = [c for c in df.columns if c not in existing]
+    return df[existing + rest]
 
 
 # -----------------------------
@@ -408,10 +405,7 @@ def _ensure_dir_with_mgfs_from_upload(files: List) -> str:
 
 
 def _ensure_dir_from_path_or_file(path_str: str) -> str:
-    """
-    Accept a directory OR a single .mgf file path.
-    If it's a single .mgf file, copy it into a temp folder and return that folder.
-    """
+    """Accept a directory OR a single .mgf file path."""
     p = Path(path_str).expanduser()
     if p.is_dir():
         return str(p)
@@ -425,10 +419,7 @@ def _ensure_dir_from_path_or_file(path_str: str) -> str:
 
 
 def _parse_frag_string(frag_str: str) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Convert 'mz:rel%;mz:rel%;...' → (mz_array, rel_array)
-    Returns empty arrays if string is blank.
-    """
+    """Convert 'mz:rel%;mz:rel%;...' → (mz_array, rel_array)."""
     if not frag_str:
         return np.array([]), np.array([])
     mzs, rels = [], []
@@ -443,51 +434,6 @@ def _parse_frag_string(frag_str: str) -> Tuple[np.ndarray, np.ndarray]:
         except ValueError:
             continue
     return np.array(mzs, float), np.array(rels, float)
-
-
-@st.cache_data(show_spinner=False)
-def build_table_from_dir(
-    folder_with_mgfs: str,
-    top_n: int,
-    min_rel_pct: float,
-    include_metadata: bool = True,
-) -> pd.DataFrame:
-    """Load spectra, build the summary DataFrame and append optional MGF metadata."""
-    spectra_by_batch = mgf2frag.load_mgf_spectra(folder_with_mgfs)
-    df = mgf2frag.spectra_to_dataframe(
-        spectra_by_batch,
-        top_n=top_n,
-        min_rel_pct=min_rel_pct,
-    )
-
-    if include_metadata:
-        metadata_df = extract_optional_metadata_from_dir(folder_with_mgfs)
-        df = merge_metadata_into_fragment_table(df, metadata_df)
-
-    cols = [
-        "batch",
-        "compound_name",
-        "inchikey",
-        "smiles",
-        "inchi",
-        "molecular_formula",
-        "exact_mass",
-        "adduct",
-        "charge",
-        "rt_seconds",
-        "rt_minutes",
-        "collision_energy",
-        "ion_mode",
-        "instrument",
-        "scans",
-        "scan_number",
-        "precursor_mass",
-        "n_fragments",
-        "fragments",
-    ]
-    existing = [c for c in cols if c in df.columns]
-    rest = [c for c in df.columns if c not in existing]
-    return df[existing + rest]
 
 
 # -----------------------------
@@ -529,7 +475,6 @@ except Exception:
         unsafe_allow_html=True,
     )
 
-# Collect input
 temp_dir_to_use = None
 if mode == "Upload .mgf file(s)":
     uploads = st.file_uploader(
@@ -552,7 +497,6 @@ else:
             st.error(str(e))
             temp_dir_to_use = None
 
-# Build table
 df = None
 if temp_dir_to_use:
     with st.spinner("Reading MGF and assembling table..."):
@@ -566,16 +510,17 @@ if temp_dir_to_use:
         except Exception as e:
             st.error(f"Failed to build table: {e}")
 
-# Display and interactions
 if df is not None and len(df):
     if q.strip():
         qlow = q.strip()
-        mask = df.astype(str).apply(lambda c: c.str.contains(qlow, case=False, na=False)).any(axis=1)
+        mask = df.astype(str).apply(
+            lambda c: c.str.contains(qlow, case=False, na=False, regex=False)
+        ).any(axis=1)
         df_show = df[mask]
     else:
         df_show = df.copy()
 
-    st.success(f"Loaded {len(df)} rows. Showing {len(df_show)} after filter.")
+    st.success(f"Loaded {len(df)} spectra. Showing {len(df_show)} after filter.")
 
     if include_metadata:
         metadata_cols = [
@@ -588,18 +533,36 @@ if df is not None and len(df):
             "rt_seconds",
             "rt_minutes",
             "collision_energy",
+            "ion_mode",
+            "instrument",
+            "library_id",
         ]
-        detected = [c for c in metadata_cols if c in df.columns and df[c].astype(str).str.strip().ne("").any()]
+        detected = [
+            c for c in metadata_cols
+            if c in df.columns and df[c].astype(str).str.strip().ne("").any()
+        ]
         if detected:
             st.caption("Optional metadata detected: " + ", ".join(detected))
         else:
             st.caption("No optional annotation metadata detected in the uploaded MGF fields.")
 
         with st.expander("Metadata check", expanded=False):
+            preview_cols = [
+                c for c in [
+                    "batch",
+                    "compound_name",
+                    "inchikey",
+                    "smiles",
+                    "molecular_formula",
+                    "adduct",
+                    "rt_seconds",
+                    "rt_minutes",
+                    "collision_energy",
+                ]
+                if c in df.columns
+            ]
             st.write("Columns in current table:", list(df.columns))
-            preview_cols = [c for c in ["batch", "compound_name", "inchikey", "smiles", "molecular_formula", "adduct", "rt_seconds", "rt_minutes"] if c in df.columns]
-            if preview_cols:
-                st.dataframe(df[preview_cols].head(10), use_container_width=True)
+            st.dataframe(df[preview_cols].head(20), use_container_width=True)
 
     st.dataframe(df_show, use_container_width=True, height=520)
 
@@ -667,6 +630,7 @@ if df is not None and len(df):
                     f"scans: {row.get('scans','')}",
                     f"scan_number: {row.get('scan_number','')}",
                     f"precursor_mass: {row.get('precursor_mass','')}",
+                    f"n_fragments_original: {row.get('n_fragments_original','')}",
                     f"n_fragments: {row.get('n_fragments','')}",
                     f"fragments: {frag_str}",
                 ]
@@ -691,6 +655,7 @@ if df is not None and len(df):
             file_name="mgf_fragments_summary.tsv",
             mime="text/tab-separated-values",
         )
+
 elif df is not None and len(df) == 0:
     st.warning("No spectra were detected in the selected MGF data.")
 else:
