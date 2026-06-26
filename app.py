@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-APP_VERSION = "v0.4 — direct MGF parser with optional metadata / InChIKey support"
+APP_VERSION = "v0.5 — MassQL-ready fragment m/z column"
 
 st.set_page_config(page_title="MGF → Fragment Tables", layout="wide")
 
@@ -313,17 +313,22 @@ def _spectrum_to_record(
         filtered = sorted(filtered, key=lambda x: x[1], reverse=True)[: int(top_n)]
         filtered = sorted(filtered, key=lambda x: x[0])
 
-        fragments = ";".join(
+        fragments_mz = ";".join(_format_float(mz) for mz, _rel, _int in filtered)
+        fragments_with_intensity = ";".join(
             f"{_format_float(mz)}:{_format_float(rel, 2)}%" for mz, rel, _int in filtered
         )
 
         record["n_fragments_original"] = len(peaks)
         record["n_fragments"] = len(filtered)
-        record["fragments"] = fragments
+        # MassQL Builder-ready column: m/z values only, separated by semicolon.
+        record["fragments"] = fragments_mz
+        # Human-readable spectrum summary retaining relative intensities.
+        record["fragments_with_intensity"] = fragments_with_intensity
     else:
         record["n_fragments_original"] = 0
         record["n_fragments"] = 0
         record["fragments"] = ""
+        record["fragments_with_intensity"] = ""
 
     return record
 
@@ -384,6 +389,7 @@ def build_table_from_dir(
         "n_fragments_original",
         "n_fragments",
         "fragments",
+        "fragments_with_intensity",
     ]
     existing = [c for c in preferred_cols if c in df.columns]
     rest = [c for c in df.columns if c not in existing]
@@ -587,7 +593,7 @@ if df is not None and len(df):
             idx = label_to_idx[selected_label]
             row = df_show.loc[idx]
 
-            frag_str = row.get("fragments", "")
+            frag_str = row.get("fragments_with_intensity", row.get("fragments", ""))
             mzs, rels = _parse_frag_string(frag_str)
 
             c1, c2 = st.columns([2, 1])
@@ -632,7 +638,8 @@ if df is not None and len(df):
                     f"precursor_mass: {row.get('precursor_mass','')}",
                     f"n_fragments_original: {row.get('n_fragments_original','')}",
                     f"n_fragments: {row.get('n_fragments','')}",
-                    f"fragments: {frag_str}",
+                    f"fragments: {row.get('fragments','')}",
+                    f"fragments_with_intensity: {row.get('fragments_with_intensity','')}",
                 ]
                 st.code("\n".join(raw_lines))
 
